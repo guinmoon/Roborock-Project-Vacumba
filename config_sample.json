@@ -1,0 +1,12 @@
+{
+    "bot_ip": "192.168.1.125",
+    "bot_token": "644d6942414356434c6139636c575766",
+    "bot_driver": "valetudo",
+    "allow_move_bot": true,
+    "screen_update_frame_rate": 20,
+    "rtsp_link": "rtsp://192.168.1.86:8554/unicast",
+    "web_server_listen_ip": "0.0.0.0",
+    "web_server_listen_port": "4444",
+    "web_server_debug": true,
+    "mjpeg_quality": 20
+}
