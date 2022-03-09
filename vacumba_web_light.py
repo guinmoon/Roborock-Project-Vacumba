@@ -1,10 +1,12 @@
 # Управляем роботом пылесосом Xiaomi Roborock vaccum с помощью веб интерфейса и камеры.
+from datetime import datetime
 import cv2
 import time
 import threading
 import json
 import dload
 import urllib.request
+import logging
 
 from flask import Response
 from flask import Flask
@@ -12,6 +14,7 @@ from flask import render_template
 from flask import request, send_from_directory
 
 import lib.bot_control as botc
+import lib.stopable_thread as stopable_thread
 # from lib.Battery import Battery as Battery
 # from lib.colors import *
 # from config import *
@@ -37,6 +40,17 @@ web_server_listen_ip = ''
 web_server_listen_port = ''
 encode_param = None
 
+last_frame_request_date = None
+minutes_since_last_frame_request = 0
+stop_stream_delay_sec = 2
+
+frame_update_thread = None
+
+capture_mutex = threading.Lock()
+
+frame_update_thread = None
+stream_requests_catcher_thread = None
+
 
 def generate_response():
     if outputFrame is None:
@@ -57,6 +71,8 @@ def generate_response():
             continue
         yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' +
               bytearray(encodedImage) + b'\r\n')
+        global last_frame_request_date
+        last_frame_request_date = datetime.now()
         time.sleep(sleep_delay)
 
 
@@ -119,6 +135,17 @@ web_server = Flask(__name__)
 
 @web_server.route("/")
 def index():
+    global frame_update_thread
+    global capture
+    opnd = False
+    if capture is not None:
+        opnd = capture.isOpened()
+    if capture is None or not opnd:
+        capture = cv2.VideoCapture(rtsp_link)
+        if frame_update_thread is None:
+            frame_update_thread = threading.Thread(target=update, args=())
+            frame_update_thread.start()
+        print("Video Stream started.")
     return render_template("index.html")
 
 
@@ -169,21 +196,49 @@ def get_post_javascript_data_action():
 
 def update():
     global capture, outputFrame
+    a = 1
     # Read the next frame from the stream in a different thread
     while True:
-        if capture.isOpened():
+        if capture is not None and capture.isOpened():
+            capture_mutex.acquire()
+            if capture is None:
+                continue
             (status, frame) = capture.read()
+            capture_mutex.release()
             if status == True:
                 outputFrame = frame.copy()
             else:
                 check = False
                 while not check:
+                    capture_mutex.acquire()
                     capture = cv2.VideoCapture(rtsp_link)
                     (status, frame) = capture.read()
+                    capture_mutex.release()
                     if status:
                         check = True
                     else:
                         time.sleep(0.2)
+        else:
+            time.sleep(0.2)
+
+
+def stream_requests_catcher():
+    global capture, outputFrame
+    global last_frame_request_date, stop_stream_delay_sec
+    while True:
+        if last_frame_request_date is not None:
+            date_diff = (datetime.now() -
+                         last_frame_request_date).total_seconds()
+            if date_diff > stop_stream_delay_sec:
+                last_frame_request_date = None
+                capture_mutex.acquire()
+                capture.release()
+                capture = None
+                capture_mutex.release()
+                outputFrame = None
+                print("Video Stream stoped.")
+        else:
+            time.sleep(0.2)
 
 
 def run_server():
@@ -202,13 +257,19 @@ if __name__ == '__main__':
     web_server_listen_ip = Config["web_server_listen_ip"]
     web_server_listen_port = Config["web_server_listen_port"]
     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), Config["mjpeg_quality"]]
-    capture = cv2.VideoCapture(rtsp_link)
+    if not Config["web_server_debug"]:
+        log = logging.getLogger('werkzeug')
+        log.setLevel(logging.ERROR)
+
     web_server_thread = threading.Thread(target=run_server)
     web_server_thread.start()
-    frame_update_thread = threading.Thread(target=update, args=())
-    frame_update_thread.start()
 
     map_update_thread = threading.Thread(
         target=update_map, args=[Config["bot_ip"]])
     map_update_thread.start()
+
+    stream_requests_catcher_thread = threading.Thread(
+        target=stream_requests_catcher)
+    stream_requests_catcher_thread.start()
+
     input("Press any key to exit...")
